@@ -599,14 +599,18 @@ function renderChannels(){
   }
   h += '</div>';
   $('chList').innerHTML = h;
-  // 事件委托
-  $('chList').querySelectorAll('button, .switch').forEach(el=>{
-    el.addEventListener('change' , ev => { if (el.dataset.act==='toggle') toggleChannel(el.dataset.id, el.checked); });
-    el.addEventListener('click'  , ev => {
-      const a = el.dataset.act;
-      if (a==='edit') openChannelModal(el.dataset.id);
-      else if (a==='del') delChannel(el.dataset.id);
-      else if (a==='test') testChannel(el.dataset.id);
+  // 事件绑定(BUG 修复): change 事件不冒泡, 不能绑在外层 .switch 上。
+  // 必须把 toggle 监听直接绑到每个 checkbox(input) 本身, 否则启用开关点了毫无反应。
+  $('chList').querySelectorAll('input[type="checkbox"][data-act="toggle"]').forEach(inp=>{
+    inp.addEventListener('change', ()=> toggleChannel(inp.dataset.id, inp.checked));
+  });
+  // 按钮(编辑/删除/测试)走 click(click 会冒泡), 直接绑在按钮上
+  $('chList').querySelectorAll('button[data-act]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const a = btn.dataset.act;
+      if (a==='edit') openChannelModal(btn.dataset.id);
+      else if (a==='del') delChannel(btn.dataset.id);
+      else if (a==='test') testChannel(btn.dataset.id);
     });
   });
 }
