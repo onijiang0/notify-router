@@ -1,0 +1,31 @@
+services:
+  notify-router:
+    build: .
+    image: notify-router:latest
+    container_name: notify-router
+    restart: unless-stopped
+    # 宿主端口 18081 未被占用; 容器内仍监听 8080。可用 http://<服务器IP>:18081 打开管理界面
+    ports:
+      - "18081:8080"
+    environment:
+      # 容器内监听端口(通常保持 8080, 与上方映射一致; 也可在 UI「系统设置」改, 需同步映射)
+      LISTEN_PORT: "8080"
+      # 首次启动种子: 会自动生成「企业微信」「钉钉」两个启用渠道。
+      # 之后所有渠道/规则/兜底策略都在 Web UI「渠道管理 / 分流规则」里改,
+      # 持久化到 /app/config/config.json, 这些环境变量不再覆盖。
+      QYWX_KEY: ""
+      DINGTALK_ACCESS_TOKEN: ""
+      DINGTALK_SECRET: ""
+      FALLBACK_ALL: "true"
+    # 配置持久化: Web UI 保存的渠道/规则/美化写到这里, 重启不丢
+    volumes:
+      - notify-router-config:/app/config
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+(process.env.LISTEN_PORT||8080)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  notify-router-config:

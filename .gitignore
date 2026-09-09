@@ -1,0 +1,9 @@
+# 运行时生成/本地产物, 不应进 GitHub
+config.json
+config/
+ui-预览.html
+*.zip
+
+# 编辑器/系统
+.DS_Store
+Thumbs.db
