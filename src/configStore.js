@@ -194,6 +194,16 @@ function genId(prefix) {
 
 function createStore(filePath) {
   const fp = path.resolve(filePath || (process.env.CONFIG_FILE || '/app/config/config.json'));
+  const bp = fp + '.bak'; // 自动备份: 每次 save 前把上一份复制到 .bak
+
+  function tryRead(p) {
+    try {
+      const raw = fs.readFileSync(p, 'utf8');
+      return { ok: true, data: JSON.parse(raw) };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  }
 
   function read() {
     if (!fs.existsSync(fp)) {
@@ -206,18 +216,31 @@ function createStore(filePath) {
         return { data: seed, from: 'env-seed(no-write)' };
       }
     }
-    try {
-      const raw = fs.readFileSync(fp, 'utf8');
-      const parsed = JSON.parse(raw);
-      const merged = { ...initialFromEnv(), ...parsed };
+    // 主文件存在: 读 + sanitize; 若解析失败, 自动回退到 .bak
+    const main = tryRead(fp);
+    if (main.ok) {
+      const merged = { ...initialFromEnv(), ...main.data };
       merged.channels = sanitizeChannels(merged.channels);
       merged.rules = sanitizeRules(merged.rules);
-      merged.ui = sanitizeUi(parsed.ui || {});
-      if ('fallbackAll' in parsed) merged.fallbackAll = parsed.fallbackAll === true || parsed.fallbackAll === 'true';
+      merged.ui = sanitizeUi(main.data.ui || {});
+      if ('fallbackAll' in main.data) merged.fallbackAll = main.data.fallbackAll === true || main.data.fallbackAll === 'true';
       return { data: merged, from: 'file' };
-    } catch (e) {
-      return { data: initialFromEnv(), from: 'file-error:' + e.message };
     }
+    // 主文件损坏: 尝试从 .bak 恢复, 并写回主文件(若 .bak 有效)
+    const bak = tryRead(bp);
+    if (bak.ok) {
+      try {
+        fs.mkdirSync(path.dirname(fp), { recursive: true });
+        fs.writeFileSync(fp, JSON.stringify(bak.data, null, 2), 'utf8');
+      } catch (e) {}
+      const merged = { ...initialFromEnv(), ...bak.data };
+      merged.channels = sanitizeChannels(merged.channels);
+      merged.rules = sanitizeRules(merged.rules);
+      merged.ui = sanitizeUi(bak.data.ui || {});
+      if ('fallbackAll' in bak.data) merged.fallbackAll = bak.data.fallbackAll === true || bak.data.fallbackAll === 'true';
+      return { data: merged, from: 'file-bak-recovered:' + main.error };
+    }
+    return { data: initialFromEnv(), from: 'file-error:' + main.error };
   }
 
   let state = read();
@@ -241,6 +264,8 @@ function createStore(filePath) {
     let persisted = false;
     try {
       fs.mkdirSync(path.dirname(fp), { recursive: true });
+      // 写新值前, 把当前主文件复制到 .bak 作为"上一次成功保存"的快照
+      try { fs.copyFileSync(fp, bp); } catch (e) { /* 无旧文件或权限, 忽略 */ }
       fs.writeFileSync(fp, JSON.stringify(next, null, 2), 'utf8');
       persisted = true;
     } catch (e) { /* 仅内存 */ }
@@ -257,6 +282,7 @@ function createStore(filePath) {
     let persisted = false;
     try {
       fs.mkdirSync(path.dirname(fp), { recursive: true });
+      try { fs.copyFileSync(fp, bp); } catch (e) { /* 无旧文件, 忽略 */ }
       fs.writeFileSync(fp, JSON.stringify(next, null, 2), 'utf8');
       persisted = true;
     } catch (e) {}
@@ -267,7 +293,27 @@ function createStore(filePath) {
   function getChannelTemplate(type) { return channelTemplate(type); }
   function getChannelTypes() { return CHANNEL_TYPES.slice(); }
 
-  return { current, save, replaceAll, getFilePath, getChannelTemplate, getChannelTypes };
+  // 导出: 返回磁盘上 config.json 原文(不带 sanitize/合并), 便于外部精确备份
+  function exportRaw() {
+    try {
+      return { ok: true, json: fs.readFileSync(fp, 'utf8') };
+    } catch (e) {
+      // 若磁盘没有文件, 用内存 current 兜底
+      return { ok: true, json: JSON.stringify(state.data, null, 2), fromMemory: true };
+    }
+  }
+
+  // 导入: 接收外部 JSON 字符串, 解析并 sanitize, 写盘 (同时刷新 .bak)
+  function importRaw(jsonText) {
+    let obj;
+    try { obj = JSON.parse(jsonText); } catch (e) { return { ok: false, error: 'invalid-json: ' + e.message }; }
+    if (!obj || typeof obj !== 'object') return { ok: false, error: 'not-an-object' };
+    // 复用 replaceAll 走 sanitize + 写盘
+    const saved = replaceAll(obj);
+    return { ok: true, data: saved.data, persisted: saved.persisted };
+  }
+
+  return { current, save, replaceAll, getFilePath, getChannelTemplate, getChannelTypes, exportRaw, importRaw };
 }
 
 module.exports = {

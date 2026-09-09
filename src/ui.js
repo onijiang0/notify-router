@@ -317,12 +317,28 @@ function renderUiHtml() {
           <div class="lrow"><div><div><strong>监听端口</strong></div><div class="hint">容器内监听端口；改动需重启监听(容器对外映射需在部署时调整)</div></div>
             <input type="number" id="cfg_listenPort" style="width:140px"></div>
         </div>
+
         <div class="card mt" style="margin-top:14px">
           <div class="t">配置来源</div>
           <div class="lrow" style="border:none"><div class="code" id="cfg_file" style="flex:1">–</div>
             <button class="ghost sm" id="btnExport">导出配置</button>
+            <input type="file" id="fileImport" accept="application/json,.json" style="display:none">
+            <button class="ghost sm" id="btnImport">导入配置</button>
             <button class="ghost sm" id="btnReload">重新载入</button></div>
-          <div class="hint">导出 = 下载当前 config.json 副本，便于备份/迁移。</div>
+          <div class="hint">导出 = 下载服务端磁盘上的 config.json 原文，便于备份/迁移。导入 = 覆盖当前所有渠道/规则/美化设置（立即生效并持久化）；建议先导出当前配置再导入新文件，避免误丢。</div>
+        </div>
+
+        <div class="card mt" style="margin-top:14px">
+          <div class="t">版本与升级</div>
+          <div class="lrow" style="border:none">
+            <div style="flex:1">
+              <div>当前版本：<span class="code" id="ver_cur">–</span></div>
+              <div>远端 ghcr digest：<span class="code" id="ver_remote">未检测</span></div>
+              <div class="hint" id="ver_hint">点击「检测升级」查询 ghcr.io 最新镜像 digest。卷在 /app/config，升级不会丢配置。</div>
+            </div>
+            <button class="ghost sm" id="btnCheckUpgrade">检测升级</button>
+          </div>
+          <div class="hint" style="margin-top:6px">⚠️ 升级方式：在 DPanel → 容器列表 → <strong>notify-router</strong> 详情页 → 点橙色 <strong>「重新部署」</strong> 按钮（保留命名卷 <code>notify-router-config</code>、端口映射、环境变量不变，DPanel 会自动拉 latest 镜像并重建容器）。<strong>不要</strong>用「删除容器」方式重建，否则命名卷会一起丢、配置就没了。</div>
         </div>
       </div>
     </div>
@@ -866,9 +882,14 @@ function openTestHit(ruleId){
 
 /* ================= 系统设置 ================= */
 let settingsBound = false;
-function renderSettings(){
+async function renderSettings(){
   $('cfg_listenPort').value = CFG.listenPort||8080;
   $('cfg_file').textContent = CFG._file || '(在服务器 /app/config/config.json)';
+  // 当前版本
+  try {
+    const v = await api('GET','/api/version');
+    if (v && v.version) $('ver_cur').textContent = v.version;
+  } catch(e){ $('ver_cur').textContent = '获取失败'; }
   if (settingsBound) return;
   settingsBound = true;
   $('cfg_listenPort').addEventListener('change', async (e)=>{
@@ -877,11 +898,50 @@ function renderSettings(){
     const r = await api('POST','/api/config',{ listenPort: p });
     CFG = r.config; toast('端口已保存; 监听已热切换','ok');
   });
-  $('btnExport').onclick = ()=>{
-    const blob = new Blob([JSON.stringify(CFG,null,2)], {type:'application/json'});
-    const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='notify-router-config.json'; a.click();
+  // 导出配置: 走服务端 GET /api/config/export(下载磁盘上的真实 config.json 原文)
+  $('btnExport').onclick = async ()=>{
+    try {
+      const resp = await fetch('/api/config/export');
+      if (!resp.ok) return toast('导出失败: '+resp.status,'err');
+      const blob = await resp.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'notify-router-config-'+new Date().toISOString().slice(0,10)+'.json';
+      a.click();
+      toast('已导出','ok');
+    } catch(e){ toast('导出失败: '+e.message,'err'); }
   };
+  // 导入配置: 选择文件 → POST /api/config/import
+  $('btnImport').onclick = ()=> $('fileImport').click();
+  $('fileImport').addEventListener('change', async (e)=>{
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    modalConfirm('导入配置并覆盖?','该项会立即用所选文件替换所有渠道/规则/美化设置。建议先「导出配置」备份当前。', async ()=>{
+      const text = await f.text();
+      try {
+        const r = await fetch('/api/config/import', { method:'POST', headers:{'Content-Type':'application/json'}, body: text });
+        const j = await r.json();
+        if (!j.ok) return toast('导入失败: '+(j.error||'未知'),'err');
+        toast('导入成功; 已持久化='+j.persisted,'ok');
+        await loadConfig(); renderChannels(); renderRules(); renderSettings();
+      } catch(err){ toast('导入失败: '+err.message,'err'); }
+    });
+    e.target.value = '';
+  });
   $('btnReload').onclick = async ()=>{ await loadConfig(); toast('已重新载入配置','ok'); };
+  // 检测升级: 查远端 ghcr digest
+  $('btnCheckUpgrade').onclick = async ()=>{
+    $('ver_remote').textContent = '查询中…';
+    try {
+      const r = await api('GET','/api/upgrade-check');
+      if (r.ok && r.latestDigest) {
+        $('ver_remote').textContent = r.latestDigest;
+        $('ver_hint').textContent = '查询时间: '+new Date().toLocaleString()+'. 若与上次部署后记录不同, 即可到 DPanel 容器详情点「重新部署」升级。';
+      } else {
+        $('ver_remote').textContent = '查询失败';
+        $('ver_hint').textContent = '远端查询失败: '+(r.error||r.httpStatus||'未知')+'. 可手动到 DPanel 容器详情点「重新部署」升级, 或检查 ghcr.io 连通性。';
+      }
+    } catch(e){ $('ver_remote').textContent='查询失败'; $('ver_hint').textContent='请求失败: '+e.message; }
+  };
 }
 
 /* ================= 日志 ================= */

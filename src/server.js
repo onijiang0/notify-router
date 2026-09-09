@@ -1,10 +1,16 @@
 'use strict';
 const http = require('http');
+const path = require('path');
+const fs = require('fs');
 const { createStore, genId } = require('./configStore');
 const { extractText, decideTargets } = require('./router');
 const { sendToChannel } = require('./channels');
 const { createLogger } = require('./log');
 const { renderUiHtml } = require('./ui');
+
+// 当前版本(从 package.json 读, 启动时一次性取)
+let APP_VERSION = '0.0.0';
+try { APP_VERSION = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')).version || APP_VERSION; } catch (e) {}
 
 // 配置存储: 优先读 /app/config/config.json
 const store = createStore();
@@ -208,6 +214,52 @@ async function router(req, res) {
     const innerUrl = '/' + url.replace(/^\/api/, '').replace(/^\//, '');
     req.url = innerUrl; // 直接改写(每个请求独立对象), 保留 on/method 等原型方法
     return apiRouter(req, res, c);
+  }
+
+  // 导出配置(下载服务端 config.json 原文)
+  if (req.method === 'GET' && url === '/api/config/export') {
+    const ex = store.exportRaw();
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="notify-router-config.json"',
+    });
+    return res.end(ex.json || '{}');
+  }
+
+  // 导入配置(接收上传的 JSON 字符串)
+  if (req.method === 'POST' && url === '/api/config/import') {
+    try {
+      const raw = await readBody(req);
+      const r = store.importRaw(raw);
+      if (!r.ok) return sendJson(res, 400, r);
+      log('config-imported persisted=' + r.persisted);
+      return sendJson(res, 200, { ok: true, config: r.data, persisted: r.persisted });
+    } catch (e) { return sendJson(res, 400, { ok: false, error: e.message }); }
+  }
+
+  // 当前版本(供 UI 显示/升级提示)
+  if (req.method === 'GET' && url === '/api/version') {
+    return sendJson(res, 200, { ok: true, version: APP_VERSION, configFile: store.getFilePath() });
+  }
+
+  // 检测升级: 远端 ghcr.io latest 的 digest(无需鉴权, 包已设 Public)。
+  // 返回 { latestDigest, fetchedAt }; UI 配合自身当前 digest 显示是否有新版本。
+  if (req.method === 'GET' && url === '/api/upgrade-check') {
+    const repo = 'onijiang0/notify-router';
+    try {
+      // ghcr.io v2 协议: 拿匿名 token → 拉 manifest
+      const tokenRes = await fetch('https://ghcr.io/token?scope=repository:' + repo + ':pull', {
+        headers: { 'User-Agent': 'notify-router/' + APP_VERSION },
+      }).then((r) => r.json()).catch(() => null);
+      const token = tokenRes && tokenRes.token;
+      const headers = { 'Accept': 'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json', 'User-Agent': 'notify-router/' + APP_VERSION };
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+      const mRes = await fetch('https://ghcr.io/v2/' + repo + '/manifests/latest', { headers });
+      const digest = mRes.headers.get('docker-content-digest') || '';
+      return sendJson(res, 200, { ok: true, repo, latestDigest: digest, httpStatus: mRes.status, fetchedAt: Date.now() });
+    } catch (e) {
+      return sendJson(res, 200, { ok: false, repo, error: e.message, fetchedAt: Date.now() });
+    }
   }
 
   // 元信息: 渠道模板/类型(供 UI 新建用)
