@@ -1,0 +1,62 @@
+# notify-router 免构建: 每次 push / 打 tag 时, 由 GitHub 云端自动构建镜像并推送到
+# GitHub 容器仓库 ghcr.io。之后 DPanel 里只填镜像地址直接拉取运行, 全程无"构建"步骤。
+#
+# 开启方法(仅首次):
+#   GitHub 仓库 → Settings → 左侧 Packages? 没有, 而是:
+#   Settings → Actions → General → Workflow permissions → 选 "Read and write permissions" → Save
+#   (给 GITHUB_TOKEN 写 ghcr.io 的权限)
+# 然后 push 本文件即可; 构建完成后到仓库首页右侧 Packages 可见 notify-router 镜像。
+name: build-and-push-image
+
+on:
+  push:
+    branches: [main]
+    # 也可用 git tag v1.0.0 等触发并打对应版本标签
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  # 镜像全名, 在 GitHub 页面「Settings → Secrets and variables → Actions → New repository secret」
+  # 里加一个 secret 叫 IMAGE_NAME=notify-router(可不加, 默认用仓库名)
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 组装镜像标签列表
+      - name: Build image tag list
+        id: tags
+        run: |
+          IMG="${{ env.REGISTRY }}/${{ github.repository }}"
+          TAGS="$IMG:latest"
+          # 若是打 tag(v1.0.0) 触发, 额外带一个对应版本标签
+          if [ -n "${{ github.ref_type }}" ] && [ "${{ github.ref_type }}" = "tag" ]; then
+            TAGS="$TAGS,$IMG:${{ github.ref_name }}"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # 自动多架构, 适配你的小主机是 amd64(x86) 还是 arm64
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.tags.outputs.tags }}
+          # 缓存加速重复构建(存到 ghcr)
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}:buildcache,mode=max
