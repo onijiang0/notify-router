@@ -13,6 +13,8 @@
   - `全部命中`（无条件，用作"剩余都走指定集合"的兜底）
 - **无规则命中 → 默认发全部启用渠道**（可一键关闭为"不发送"）。
 - **侧边栏多页面导航**：总览 / 发送投递 / 渠道管理 / 分流规则 / 转发日志 / 界面美化 / 系统设置，互不干扰。
+- **配置可随身带走**：系统设置里可**导出/导入**整个 `config.json`（异地备份、迁移、恢复），并在每次保存时自动写一份 `.bak`，主文件损坏启动时自动回退。
+- **系统设置内可"检测升级"**：一键查询 `ghcr.io` 最新镜像 digest，核对小主机上是否已是最新版。
 
 ## 工作原理
 
@@ -29,9 +31,9 @@
 ```
 notify-router/
 ├─ src/
-│  ├─ server.js       # HTTP: /(UI多页)、/api/config、/api/channels、/api/rules、/api/test、
-│  │                  #        /api/logs、/health、POST /notify
-│  ├─ configStore.js  # 配置存储: channels[]/rules[] 规范化 + config.json 持久化 + 环境变量播种
+│  ├─ server.js       # HTTP: /(UI多页)、/api/config(export/import)、/api/channels、/api/rules、
+│  │                  #        /api/test、/api/logs、/api/version、/api/upgrade-check、/health、POST /notify
+│  ├─ configStore.js  # 配置存储: channels[]/rules[] 规范化 + config.json 持久化 + .bak自动备份/损坏回退 + 环境变量播种
 │  ├─ router.js       # 规则引擎(纯逻辑): 遍历规则→首个命中定渠道; 否则全发
 │  ├─ channels.js     # 渠道适配器注册表: wecom/dingtalk/pushplus/generic
 │  ├─ log.js          # 内存环形转发日志
@@ -71,6 +73,8 @@ notify-router/
 
 `generic` 渠道 bodyTemplate 支持占位符 **`{{title}}` / `{{content}}`**；`contentType` 可选 `json` / `form` / `raw`，`raw` 时模板即纯文本正文。这样几乎任何通知 API（Bark、Server酱、Telegram、飞书、自建接口……）都能接进来。
 
+> **持久化**：这份文件存于挂载卷 `/app/config/config.json`。每次保存会自动写一份 `config.json.bak`（上一次成功快照）；启动时若主文件损坏，会自动用 `.bak` 回退，不会因写一半崩溃而丢光。系统设置页可一键**导出**（下载原文）或**导入**（覆盖恢复）。
+
 ---
 
 ## 一、通过 DPanel 部署（推荐，只点鼠标）
@@ -98,7 +102,7 @@ http://<小主机IP>:18081
 - **分流规则**：增删改规则，多选目标渠道；可设默认策略(无命中发全部/不发)
 - **转发日志**：最近转发明细（模式、命中规则、投递渠道、正文），自动刷新
 - **界面美化**：明暗主题、强调色、背景(渐变/纯色/上传图片)、压暗、圆角、自定义CSS，保存即持久
-- **系统设置**：监听端口、配置来源、导出/重新载入配置
+- **系统设置**：监听端口、配置来源、**导出/导入配置**、当前版本、**检测升级**
 
 **转发地址（供青龙/脚本 POST）**：`http://<小主机IP>:18081/notify`
 
@@ -126,11 +130,78 @@ curl -X POST $BASE/notify -H 'Content-Type: application/json' \
 ```
 返回 `results[]` 逐渠道给出 ok/error。也可在 Web 界面「发送投递」直接测，更直观。
 
-## 五、接入青龙（让脚本通知经过网关）
+## 五、接入青龙面板（推荐：系统通知 → 自定义通知，一条通知设置搞定）
 
-青龙原生"系统通知"企微通道 URL 固定指向 qyapi、改不了道，请走**脚本侧**接入：把签到脚本/仓库 `sendNotify` 里可自定义 webhook 的目标 URL 改成
-`http://<小主机IP>:18081/notify`，网关收到后按你的规则二次分流。
-> 青龙与本网关同机且同 docker 网络时，可直接用容器名 `http://notify-router:8080/notify`，免走宿主端口。
+> **推荐做法**：青龙较新版本（≥ v2.13，含 v2.20.x）的 **系统设置 → 通知设置** 自带
+> **「自定义通知（Webhook）」** 渠道。我们把它指向网关的 `POST /notify`，
+> **不需要去改任何脚本 / sendNotify.js**，青龙每次任务结束自动调它 → 通知进网关 → 按你的规则分流。
+
+### 5.1 青龙侧：新增一个自定义通知渠道
+
+青龙 → **系统设置 → 通知设置**，把 **通知方式切换/新增为「自定义通知（webhook）」**，填 5 个字段：
+
+| 青龙字段 | 填什么 |
+|---|---|
+| **webhookMethod** | `POST` |
+| **webhookContentType** | `application/json` |
+| **webhookUrl** | 下面 5.2 选一个 |
+| **webhookHeaders** | `Content-Type: application/json`（单行即可） |
+| **webhookBody** | 两行（青龙按多行 `key: value` 自动转成 JSON POST）：<br>`title: $title`<br>`content: $content` |
+
+保存后青龙会把每条通知包装成
+`{"title":"任务标题","content":"日志/详情", ...}` POST 到网关，网关的
+`extractText` 自动取 `title` + `content`，之后按你 UI 里的规则分流。
+
+### 5.2 webhookUrl 三个候选地址（青龙容器访问网关的通路）
+
+青龙跑在 Docker 容器里，要选一个**青龙容器内能访问到** notify-router 的地址：
+
+| # | 地址 | 说明 |
+|---|---|---|
+| 1 | `http://<宿主IP>:18081/notify` | 首选，最通用（例：`http://192.0.2.10:18081/notify`） |
+| 2 | `http://notify-router:8080/notify` | 仅当青龙与网关**同 docker 网络**（都用 `docker compose` 且同一网络时） |
+| 3 | `http://notify.<example.com>/notify` | 有反代域名时；前提青龙容器内能解析该域名 |
+
+**判断用哪个**：进青龙宿主机终端（SSH / 面板终端）跑：
+
+```bash
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"title":"ping","content":"test"}' http://192.0.2.10:18081/notify
+# 返回 {"ok":true,...} → 这个地址可用
+```
+
+### 5.3 通知进网关后如何分流
+
+进 `http://<IP>:18081` → 「分流规则」按需新增，例如：
+
+- **包含 "失败" → 只发钉钉**（`match=contains, keyword=失败, channels=[钉钉]`）
+- 其余普通成功通知 → 默认 `fallbackAll=true` 走**全部启用渠道**
+
+### 5.4 青龙通知设置的两种粒度说明
+
+| 入口 | 来源 | 是否经网关 |
+|---|---|---|
+| **① 系统通知**（任务结束自动发） | 青龙 → 系统设置 → 通知设置（含上面配的自定义通知） | ✅ 走网关 |
+| **② 脚本 sendNotify** | 各仓库 sendNotify.js 读 config.json 里的官方渠道 key | ❌ 仍直发官方接口 |
+
+- **推荐**：① 接好网关后，在青龙通知设置里**取消勾选/移除原来的企微、钉钉等官方渠道**，只留上面这条「自定义通知」→ 所有系统通知统一进网关、由网关规则决定投给谁。
+- **入口②** 若你不想双发，可保留 config.json 官方 key 不动（多数仓库 sendNotify 无渠道时空跑、不影响任务）。
+
+> 想彻底收口入口②，最干净的方式是不改各仓库 sendNotify.js，而是只靠入口①。若确需入口②也进网关，可参考下方 5.5 的脚本侧法（侵入式，仅当①不满足需求时）。
+
+### 5.5（备选）脚本侧 / 任意程序接入
+
+不依赖青龙面板时，任何程序直接把通知 POST 到网关即可：
+
+```bash
+curl -X POST http://<IP>:18081/notify \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"某任务","content":"执行失败 error 500"}'
+```
+
+网关 `extractText` 兼容常见字段别名：`title`/`subject`、`content`/`desp`/`message`/`text`/`body` 等；
+也支持纯文本 body（`POST` 一段字符串当 content）。
+青龙与本网关同机且同 docker 网络时可用容器名 `http://notify-router:8080/notify`，免开宿主端口。
 
 ## 配置存储与优先级
 
