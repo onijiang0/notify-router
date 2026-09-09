@@ -37,6 +37,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 关键: 用独立的 buildx builder(docker-container 驱动)。
+      # 否则默认 docker driver 不支持"多架构构建"也不支持"registry 缓存导出",
+      # 会报: Cache export is not supported for the docker driver.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       # 组装镜像标签列表
       - name: Build image tag list
         id: tags
