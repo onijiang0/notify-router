@@ -1,6 +1,6 @@
 # notify-router — 青龙通知分流网关 (含 Web 管理界面)
-# 无第三方依赖, 用官方 node:slim 即可
-FROM node:20-slim
+# 无第三方依赖, 用官方 node:alpine 即可(比 slim 再小 ~50MB)
+FROM node:20-alpine
 
 WORKDIR /app
 COPY package.json ./

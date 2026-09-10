@@ -1,6 +1,6 @@
 {
   "name": "notify-router",
-  "version": "5.2.1",
+  "version": "5.3.0",
   "description": "通用通知分流网关: 多渠道(企微/钉钉/PushPlus/自定义Webhook) + 用户自定义规则 + 无命中默认全发; 带多页面 Web 管理界面(支持环境变量登录鉴权/隐私打码)。Docker/Node 部署",
   "main": "src/server.js",
   "scripts": {

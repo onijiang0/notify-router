@@ -4,6 +4,9 @@ services:
     image: notify-router:latest
     container_name: notify-router
     restart: unless-stopped
+    # 资源上限: 纯 Node 转发网关用不了这么多, 防止异常时吃满宿主机
+    mem_limit: 128m
+    cpus: 0.50
     # 宿主机端口 18081 → 容器 8080。部署后访问 http://<服务器IP>:18081
     ports:
       - "18081:8080"

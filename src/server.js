@@ -1,6 +1,7 @@
 'use strict';
 const http = require('http');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const path = require('path');
 const fs = require('fs');
 const { createStore, genId } = require('./configStore');
@@ -20,6 +21,9 @@ const UPGRADE_REPO = process.env.UPGRADE_REPO || DEFAULT_UPGRADE_REPO;
 
 // 配置存储: 优先读 /app/config/config.json; 若配置了 Gist, 还会异步尝试从 Gist 拉回(应对卷丢失)
 const store = createStore();
+
+// UI HTML 缓存(首次请求时渲染一次; 界面由前端引擎驱动, 服务端模板是静态的)
+const UI_CACHE = { html: '', gz: null };
 
 // ---------------- 登录鉴权(容器环境变量开启) ----------------
 // 环境变量同时配置 AUTH_USER + AUTH_PASS(或 AUTH_PASSWORD) 即启用 Web 管理界面登录;
@@ -250,10 +254,19 @@ async function router(req, res) {
     }
   }
 
-  // Web 管理界面(单页 SPA)
+  // Web 管理界面(单页 SPA): 渲染结果缓存 + gzip(HTML ~74KB -> 传输 ~20KB, 且不重复渲染)
   if (req.method === 'GET' && (url === '/' || url === '/ui')) {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    return res.end(renderUiHtml());
+    if (!UI_CACHE.html) {
+      UI_CACHE.html = renderUiHtml();
+      UI_CACHE.gz = zlib.gzipSync(UI_CACHE.html);
+    }
+    const acceptEnc = String(req.headers['accept-encoding'] || '');
+    if (acceptEnc.includes('gzip')) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Encoding': 'gzip', 'Content-Length': UI_CACHE.gz.length });
+      return res.end(UI_CACHE.gz);
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': Buffer.byteLength(UI_CACHE.html) });
+    return res.end(UI_CACHE.html);
   }
 
   // 健康检查(统计启用渠道)
