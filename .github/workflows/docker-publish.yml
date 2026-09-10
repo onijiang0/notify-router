@@ -2,9 +2,6 @@
 # GitHub 容器仓库 ghcr.io。之后 DPanel 里只填镜像地址直接拉取运行, 全程无"构建"步骤。
 #
 # 开启方法(仅首次):
-#   GitHub 仓库 → Settings → 左侧 Packages? 没有, 而是:
-#   Settings → Actions → General → Workflow permissions → 选 "Read and write permissions" → Save
-#   (给 GITHUB_TOKEN 写 ghcr.io 的权限)
 # 然后 push 本文件即可; 构建完成后到仓库首页右侧 Packages 可见 notify-router 镜像。
 name: build-and-push-image
 

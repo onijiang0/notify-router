@@ -5,3 +5,8 @@ _testdata
 _*
 *.zip
 .git
+
+# 敏感凭据文件, 绝不进镜像层
+.env
+.env.*
+!.env.example

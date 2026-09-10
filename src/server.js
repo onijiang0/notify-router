@@ -13,6 +13,11 @@ const { renderUiHtml } = require('./ui');
 let APP_VERSION = '0.0.0';
 try { APP_VERSION = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')).version || APP_VERSION; } catch (e) {}
 
+// 「系统设置 → 检测升级」默认查询的镜像仓库。
+// fork / 自行构建镜像时, 用环境变量 UPGRADE_REPO 指向自己的仓库即可, 无需改代码。
+const DEFAULT_UPGRADE_REPO = 'onijiang0/notify-router';
+const UPGRADE_REPO = process.env.UPGRADE_REPO || DEFAULT_UPGRADE_REPO;
+
 // 配置存储: 优先读 /app/config/config.json; 若配置了 Gist, 还会异步尝试从 Gist 拉回(应对卷丢失)
 const store = createStore();
 
@@ -300,7 +305,7 @@ async function router(req, res) {
   // 检测升级: 远端 ghcr.io latest 的 digest(无需鉴权, 包已设 Public)。
   // 返回 { latestDigest, fetchedAt }; UI 配合自身当前 digest 显示是否有新版本。
   if (req.method === 'GET' && url === '/api/upgrade-check') {
-    const repo = 'onijiang0/notify-router';
+    const repo = UPGRADE_REPO;
     try {
       // ghcr.io v2 协议: 拿匿名 token → 拉 manifest
       const tokenRes = await fetch('https://ghcr.io/token?scope=repository:' + repo + ':pull', {

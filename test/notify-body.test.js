@@ -124,6 +124,7 @@ function check(name, fn) {
 // 1) 复现 bug: 现行 config.sh(占位符不加引号) + 未打补丁的网关
 // ---------------------------------------------------------------------------
 const ENV_CURRENT = {
+  // 192.0.2.0/24 是 RFC 5737 保留给文档/示例的地址段, 不会指向任何真实主机
   WEBHOOK_URL: 'http://192.0.2.10:18081/notify',
   WEBHOOK_METHOD: 'POST',
   WEBHOOK_CONTENT_TYPE: 'application/json',
