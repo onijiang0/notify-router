@@ -55,6 +55,19 @@ function renderUiHtml() {
   .pill.ok{background:rgba(34,197,94,.16);color:var(--ok);border:1px solid rgba(34,197,94,.35)}
   .pill.bad{background:rgba(239,68,68,.14);color:var(--err);border:1px solid rgba(239,68,68,.4)}
   .addr{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--accent2);word-break:break-all}
+  /* 隐私打码: 地址常驻模糊, 点击后临时显示一段时间再自动恢复 */
+  .addr.masked{filter:blur(6px);user-select:none;-webkit-user-select:none;cursor:pointer;transition:filter .18s ease}
+  .addr.masked:hover{filter:blur(4.5px)}
+  .addr.reveal{filter:none;cursor:pointer;transition:filter .18s ease}
+  /* 登录遮罩 */
+  #loginOverlay{position:fixed;inset:0;z-index:200;display:none;align-items:center;justify-content:center;
+    background:rgba(8,10,14,.72);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+  #loginOverlay.show{display:flex}
+  .login-box{width:min(360px,92vw);background:var(--panel);border:1px solid var(--border);border-radius:14px;
+    padding:26px 24px;box-shadow:0 18px 60px rgba(0,0,0,.5)}
+  .login-box h3{margin:0 0 4px;font-size:17px;display:flex;align-items:center;gap:8px}
+  .login-box .sub{color:var(--muted);font-size:12px;margin-bottom:14px}
+  #btnLogout{display:none}
   /* 内容 */
   .content{flex:1;overflow-y:auto;position:relative}
   .topbar{position:sticky;top:0;z-index:4;display:flex;align-items:center;gap:12px;padding:14px 22px;
@@ -193,8 +206,9 @@ function renderUiHtml() {
     </nav>
     <div class="sidefoot">
       <div style="margin-bottom:6px"><span id="healthPill" class="pill bad">连接中…</span></div>
-      <div class="muted" style="font-size:11px;margin-bottom:3px">收件地址 (POST /notify)</div>
-      <div class="addr" id="notifyUrl">–</div>
+      <div class="muted" style="font-size:11px;margin-bottom:3px">收件地址 (POST /notify) <span id="addrMaskTip" style="opacity:.7">🔒 点击显示</span></div>
+      <div class="addr masked" id="notifyUrl" title="点击显示 / 再次点击隐藏">–</div>
+      <button class="ghost sm" id="btnLogout" style="margin-top:10px;width:100%">⎋ 退出登录</button>
     </div>
   </aside>
 
@@ -441,6 +455,20 @@ function renderUiHtml() {
 <div class="toast" id="toast"></div>
 <div id="notifyUrlHost"></div>
 
+<!-- 登录遮罩(配置 AUTH_USER/AUTH_PASS 环境变量后启用) -->
+<div id="loginOverlay">
+  <form class="login-box" id="loginForm">
+    <h3>🔐 notify-router</h3>
+    <div class="sub">此网关已开启访问控制，请登录后管理</div>
+    <label>用户名</label>
+    <input type="text" id="lg_user" autocomplete="username" autofocus>
+    <label>密码</label>
+    <input type="password" id="lg_pass" autocomplete="current-password">
+    <div class="hint" id="lg_err" style="color:var(--err);min-height:18px"></div>
+    <button id="lg_submit" style="width:100%;justify-content:center;margin-top:4px">登 录</button>
+  </form>
+</div>
+
 <script>
 'use strict';
 const $ = (id) => document.getElementById(id);
@@ -531,8 +559,75 @@ async function api(method, path, body){
   const r = await fetch(path, opt);
   let j = {};
   try { j = await r.json(); } catch(e){}
+  if (r.status === 401) { showLogin(); throw new Error('需要登录'); }
   if (!r.ok) throw new Error(j.error || ('HTTP '+r.status));
   return j;
+}
+
+/* ================= 登录鉴权 ================= */
+let AUTH_REQUIRED = false;
+function showLogin(){
+  $('loginOverlay').classList.add('show');
+  $('lg_err').textContent = '';
+  setTimeout(()=>{ try{ $('lg_user').focus(); }catch(e){} }, 50);
+}
+function hideLogin(){ $('loginOverlay').classList.remove('show'); }
+async function doLogin(e){
+  if (e) e.preventDefault();
+  const btn = $('lg_submit');
+  btn.disabled = true; btn.textContent = '登录中…';
+  $('lg_err').textContent = '';
+  try {
+    const r = await fetch('/api/login', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ user: $('lg_user').value.trim(), pass: $('lg_pass').value }) });
+    const j = await r.json().catch(()=>({}));
+    if (!r.ok || !j.ok) { $('lg_err').textContent = j.error || ('登录失败 (HTTP '+r.status+')'); return; }
+    hideLogin();
+    $('lg_pass').value = '';
+    // 登录成功: 全量重拉配置与状态
+    await loadConfig();
+    refreshHealth();
+    api('GET','/api/version').then(v=>{ const el=$('brandVer'); if (el && v && v.version) el.textContent = 'v'+v.version; }).catch(()=>{});
+    toast('登录成功','ok');
+  } catch(err){ $('lg_err').textContent = '登录失败: '+err.message; }
+  finally { btn.disabled = false; btn.textContent = '登 录'; }
+}
+async function doLogout(){
+  try { await fetch('/api/logout', { method:'POST' }); } catch(e){}
+  toast('已退出登录','');
+  showLogin();
+}
+async function checkSession(){
+  try {
+    const r = await fetch('/api/session'); const j = await r.json();
+    AUTH_REQUIRED = !!(j && j.authRequired);
+    $('btnLogout').style.display = AUTH_REQUIRED ? '' : 'none';
+    if (AUTH_REQUIRED && !j.authenticated) showLogin();
+  } catch(e){}
+}
+
+/* ================= 左下角地址打码 ================= */
+// 常驻模糊(截图/投屏不泄露域名), 点击临时明文 8 秒后自动恢复
+let addrRevealTimer = null;
+function bindAddrMask(){
+  const el = $('notifyUrl');
+  el.classList.add('masked'); // 初始即打码
+  el.addEventListener('click', ()=>{
+    if (el.classList.contains('masked')) {
+      el.classList.remove('masked'); el.classList.add('reveal');
+      $('addrMaskTip').textContent = '🔓 8 秒后自动隐藏';
+      clearTimeout(addrRevealTimer);
+      addrRevealTimer = setTimeout(maskAddr, 8000);
+    } else {
+      maskAddr();
+    }
+  });
+}
+function maskAddr(){
+  const el = $('notifyUrl');
+  el.classList.remove('reveal'); el.classList.add('masked');
+  $('addrMaskTip').textContent = '🔒 点击显示';
+  clearTimeout(addrRevealTimer);
 }
 function toast(msg, type){
   const t = $('toast'); t.textContent = msg; t.className = 'toast show ' + (type||'');
@@ -1154,6 +1249,8 @@ async function loadConfig(){
     if (CUR_VIEW==='rules') renderRules();
     if (CUR_VIEW==='settings') renderSettings();
   } catch(e){
+    // 未登录时(登录遮罩已弹出)静默, 避免在登录页背后弹错误提示
+    if ($('loginOverlay').classList.contains('show')) return;
     toast('读取配置失败: '+e.message,'err');
   }
 }
@@ -1181,12 +1278,16 @@ function init(){
   navBind();
   bindSend();
   bindBeauty();
+  bindAddrMask();
   $('chAddBtn').addEventListener('click', ()=> openChannelModal(null));
   $('ruleAddBtn').addEventListener('click', ()=> openRuleModal(null));
+  $('loginForm').addEventListener('submit', doLogin);
+  $('btnLogout').addEventListener('click', doLogout);
   applyTheme(CFG.ui || {});
   refreshHealth();
   loadConfig();
-  // 顶部品牌旁显示版本号(取 /api/version)
+  checkSession();
+  // 顶部品牌旁显示版本号(取 /api/version; 未登录时 401 会被静默忽略)
   api('GET','/api/version').then(v=>{ const el=$('brandVer'); if (el && v && v.version) el.textContent = 'v'+v.version; }).catch(()=>{});
   setInterval(()=>{ refreshHealth(); }, 20000);
   setInterval(()=>{ if (CUR_VIEW==='logs') loadLogs(); }, 6000);

@@ -1,5 +1,6 @@
 'use strict';
 const http = require('http');
+const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const { createStore, genId } = require('./configStore');
@@ -14,6 +15,50 @@ try { APP_VERSION = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'packa
 
 // 配置存储: 优先读 /app/config/config.json; 若配置了 Gist, 还会异步尝试从 Gist 拉回(应对卷丢失)
 const store = createStore();
+
+// ---------------- 登录鉴权(容器环境变量开启) ----------------
+// 环境变量同时配置 AUTH_USER + AUTH_PASS(或 AUTH_PASSWORD) 即启用 Web 管理界面登录;
+// 不配置则完全关闭鉴权(行为与旧版一致)。/notify、/health 永远放行, 不影响脚本投递。
+const AUTH = {
+  user: process.env.AUTH_USER || '',
+  pass: process.env.AUTH_PASS || process.env.AUTH_PASSWORD || '',
+};
+AUTH.enabled = !!(AUTH.user && AUTH.pass);
+
+// 会话令牌只存内存: 容器重启后需重新登录(避免令牌落盘带来的泄露面)
+const SESSION_COOKIE = 'nr_session';
+const SESSION_TTL = 7 * 24 * 3600 * 1000; // 7 天
+const sessions = new Map(); // token -> expiresAt
+function newSessionToken() { return crypto.randomBytes(24).toString('hex'); }
+function parseCookies(req) {
+  const out = {};
+  const h = req.headers.cookie || '';
+  for (const part of h.split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) { try { out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim()); } catch (e) {} }
+  }
+  return out;
+}
+function isAuthed(req) {
+  if (!AUTH.enabled) return true;
+  const t = parseCookies(req)[SESSION_COOKIE];
+  if (!t) return false;
+  const exp = sessions.get(t);
+  if (!exp || exp < Date.now()) { sessions.delete(t); return false; }
+  return true;
+}
+// 常量时间比较, 避免逐字节猜解
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a || '')), bb = Buffer.from(String(b || ''));
+  if (ba.length !== bb.length) { try { crypto.timingSafeEqual(ba, ba); } catch (e) {} return false; }
+  return crypto.timingSafeEqual(ba, bb);
+}
+function setSessionCookie(res, token) {
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL / 1000)}`);
+}
+function clearSessionCookie(res) {
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+}
 // 日志持久化到配置卷(容器重建后仍可回看最近转发记录, 便于排查"分流失效")
 const logr = createLogger(undefined, path.join(path.dirname(store.getFilePath()), 'notify-router.log.json'));
 
@@ -191,6 +236,15 @@ async function router(req, res) {
   const url = u.split('?')[0];
   const c = cfg();
 
+  // 鉴权闸门(置于最顶: 所有 /api/* 管理接口都必须先过这里)。
+  // 公开端点: UI 外壳(/、/ui)、健康检查、脚本投递入口 /notify、会话探测与登录/注销。
+  if (AUTH.enabled) {
+    const PUBLIC = new Set(['/', '/ui', '/health', '/notify', '/api/session', '/api/login', '/api/logout']);
+    if (!PUBLIC.has(url) && !isAuthed(req)) {
+      return sendJson(res, 401, { ok: false, error: 'unauthorized: 请先登录' });
+    }
+  }
+
   // Web 管理界面(单页 SPA)
   if (req.method === 'GET' && (url === '/' || url === '/ui')) {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -317,6 +371,37 @@ async function router(req, res) {
     }
   }
 
+  // ---------------- 登录鉴权 ----------------
+  // 会话状态(公开): UI 启动时先问一次, 决定是否弹出登录页
+  if (req.method === 'GET' && url === '/api/session') {
+    return sendJson(res, 200, { ok: true, authRequired: AUTH.enabled, authenticated: isAuthed(req) });
+  }
+
+  if (AUTH.enabled) {
+    if (req.method === 'POST' && url === '/api/login') {
+      let b = {};
+      try { b = JSON.parse((await readBody(req)) || '{}'); } catch (e) {}
+      const ok = safeEqual(b.user, AUTH.user) && safeEqual(b.pass, AUTH.pass);
+      if (!ok) {
+        log('login-failed user=' + (b.user || '(empty)'));
+        // 小幅延迟, 提高暴力猜解成本
+        await new Promise((r) => setTimeout(r, 600));
+        return sendJson(res, 401, { ok: false, error: '用户名或密码错误' });
+      }
+      const token = newSessionToken();
+      sessions.set(token, Date.now() + SESSION_TTL);
+      setSessionCookie(res, token);
+      log('login-ok user=' + AUTH.user);
+      return sendJson(res, 200, { ok: true });
+    }
+    if (req.method === 'POST' && url === '/api/logout') {
+      const t = parseCookies(req)[SESSION_COOKIE];
+      if (t) sessions.delete(t);
+      clearSessionCookie(res);
+      return sendJson(res, 200, { ok: true });
+    }
+  }
+
   return sendJson(res, 404, { ok: false, error: 'not-found' });
 }
 
@@ -343,7 +428,14 @@ async function router(req, res) {
     process.exit(1);
   }
   log(`config file: ${store.getFilePath()}`);
+  log(`auth: ${AUTH.enabled ? '已启用(环境变量 AUTH_USER/AUTH_PASS), Web 管理界面需登录' : '未启用(未配置 AUTH_USER/AUTH_PASS), 管理接口无鉴权'}`);
   log(`channels=${c.channels.length} (enabled=${enabled.length}) rules=${c.rules.length} fallbackAll=${c.fallbackAll} type 支持: ${store.getChannelTypes().join('/')}`);
+
+  // 过期会话定期清理
+  setInterval(() => {
+    const now = Date.now();
+    for (const [t, exp] of sessions) if (exp < now) sessions.delete(t);
+  }, 3600 * 1000).unref();
 })();
 
 // 校验单个渠道关键字段是否配齐(用于启动警告)

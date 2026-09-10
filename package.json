@@ -1,11 +1,11 @@
 {
   "name": "notify-router",
-  "version": "5.1.2",
-  "description": "通用通知分流网关: 多渠道(企微/钉钉/PushPlus/自定义Webhook) + 用户自定义规则 + 无命中默认全发; 带多页面 Web 管理界面。Docker/Node 部署",
+  "version": "5.2.0",
+  "description": "通用通知分流网关: 多渠道(企微/钉钉/PushPlus/自定义Webhook) + 用户自定义规则 + 无命中默认全发; 带多页面 Web 管理界面(支持环境变量登录鉴权/隐私打码)。Docker/Node 部署",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/notify-body.test.js"
+    "test": "node test/notify-body.test.js && node test/auth.test.js"
   },
   "engines": {
     "node": ">=18"
