@@ -11,8 +11,33 @@
  *   regex     标题+正文匹配 rule.pattern(正则, 忽略大小写)
  *   all       该规则无条件命中(常与 channels=[] 之外用法: 用作"其余都发指定集合"的兜底规则)
  */
+
+/**
+ * 还原"字面量转义"的换行。
+ *
+ * 背景(实测踩坑): 青龙各脚本仓库(leafTheFish/smallfawn/shufflewzc 等)共用的
+ * `tools/sendNotify.js` 在 webhookNotify 里会执行 `text.replaceAll('\n', '\\n')`,
+ * 把【真实换行】换成两个字符的反斜杠 + n 再拼进请求体。
+ * 本意是让 JSON 字符串合法, 但紧接着 JSON.stringify 又把这个反斜杠转义了第二次,
+ * 于是网关收到的是字面量 "\n" —— 企微/钉钉会把它当普通文本, 长通知糊成一行。
+ *
+ * 发送端在别人仓库里, 改了会被 `git pull` 覆盖(且大写文件名过不了青龙 OpenAPI 校验),
+ * 所以在网关侧做一次还原, 与发送端实现解耦。
+ *
+ * 只处理 `\n`, 刻意不碰 `\t` / `\r`:
+ *   发送端只转义换行, 所以正文里出现的字面量 `\t`、`\r` 是**真实文本**而非转义,
+ *   还原它们会改坏内容 —— 例如 Windows 路径 `C:\temp\a` 会变成 `C:<TAB>emp\a`
+ *   (本测试用真实路径样本跑出来过)。宁可少还原也不能改坏。
+ * 副作用: 正文里本身含字面量 "\n" 的文本(如粘贴的代码片段)会被换成换行, 属可接受代价。
+ */
+function unescapeText(s) {
+  if (typeof s !== 'string' || s.indexOf('\\n') === -1) return s;
+  return s.replace(/\\n/g, '\n');
+}
+
+/** 从 payload 中提取标题与正文(兼容 title/subject/name/desp/message 等常见字段名)。 */
 function extractText(payload) {
-  if (typeof payload === 'string') return { title: '', content: payload };
+  if (typeof payload === 'string') return { title: '', content: unescapeText(payload) };
   const p = payload || {};
   const title =
     p.title || p.subject || p.name || p.msgtitle || (typeof p.header === 'string' ? p.header : '') || '';
@@ -22,7 +47,7 @@ function extractText(payload) {
     (typeof p.textContent === 'string' ? p.textContent : '') ||
     (typeof p.data === 'string' ? p.data : '') ||
     (p.data && typeof p.data === 'object' ? JSON.stringify(p.data) : '') || '';
-  return { title: String(title), content: String(content) };
+  return { title: unescapeText(String(title)), content: unescapeText(String(content)) };
 }
 
 /**
@@ -98,4 +123,4 @@ function ruleDesc(r) {
   return '全部命中';
 }
 
-module.exports = { extractText, decideTargets, compileRules };
+module.exports = { extractText, decideTargets, compileRules, unescapeText };
