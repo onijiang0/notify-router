@@ -12,7 +12,7 @@ const { renderUiHtml } = require('./ui');
 let APP_VERSION = '0.0.0';
 try { APP_VERSION = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')).version || APP_VERSION; } catch (e) {}
 
-// 配置存储: 优先读 /app/config/config.json
+// 配置存储: 优先读 /app/config/config.json; 若配置了 Gist, 还会异步尝试从 Gist 拉回(应对卷丢失)
 const store = createStore();
 const logr = createLogger();
 
@@ -262,6 +262,21 @@ async function router(req, res) {
     }
   }
 
+  // Gist 云端备份状态/拉取/推送
+  if (req.method === 'GET' && url === '/api/backup/status') {
+    return sendJson(res, 200, { ok: true, ...store.gistStatus() });
+  }
+  if (req.method === 'POST' && url === '/api/backup/pull') {
+    const r = await store.pullFromGist();
+    if (!r.ok) return sendJson(res, 400, r);
+    return sendJson(res, 200, { ok: true, persisted: r.persisted, data: r.data });
+  }
+  if (req.method === 'POST' && url === '/api/backup/push') {
+    const r = await store.pushNow();
+    if (!r.ok) return sendJson(res, 400, r);
+    return sendJson(res, 200, r);
+  }
+
   // 元信息: 渠道模板/类型(供 UI 新建用)
   if (req.method === 'GET' && url === '/api/meta') {
     return sendJson(res, 200, { ok: true, channelTypes: store.getChannelTypes() });
@@ -300,6 +315,14 @@ async function router(req, res) {
 }
 
 (async () => {
+  // 启动时: 异步尝试从 Gist 拉取(若 env 配置了 GIST_TOKEN/GIST_ID, 且本地无主文件).
+  // 这样即使卷丢了, 也能从云端恢复配置(根治"重建容器配置全没").
+  try {
+    const r = await store.readAsync();
+    if (r && r.from === 'gist-recovered') log('✨ 配置已从 GitHub Gist 恢复(本地卷可能丢失过)');
+    else if (r && r.from && r.from.startsWith('file-bak-recovered')) log('✨ 配置已从 .bak 恢复(主文件损坏)');
+  } catch (e) { log('gist-restore error:', e.message); }
+
   const c = cfg();
   const enabled = c.channels.filter((x) => x.enabled);
   if (enabled.length === 0) log('警告: 没有任何启用的通知渠道 (可在 UI「渠道管理」添加并启用)');

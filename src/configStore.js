@@ -58,6 +58,44 @@ function channelsFromEnv() {
   return out;
 }
 
+// ============== GitHub Gist 云端备份 (可选) ==============
+// 通过环境变量 GIST_TOKEN (GitHub PAT with 'gist' scope) + GIST_ID 配置
+// 启动时: 若本地无 config.json 且 env 有 GIST 配置, 自动从 Gist 拉回
+// 保存时: 若 env 有 GIST 配置, 异步把最新 config push 到 Gist
+// 注意: GIST_TOKEN 永远不写入 config.json, 也不返回给前端; 备份对前端只暴露 status(已配置/未配置/最近同步时间)
+function gistConfigured() { return !!(process.env.GIST_TOKEN && process.env.GIST_ID); }
+async function tryFetchFromGist() {
+  if (!gistConfigured()) return null;
+  try {
+    const res = await fetch('https://api.github.com/gists/' + encodeURIComponent(process.env.GIST_ID), {
+      headers: { 'Authorization': 'Bearer ' + process.env.GIST_TOKEN, 'User-Agent': 'notify-router' },
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    // Gist 文件名固定 notify-router-config.json, 兼容单文件
+    const f = (j.files && (j.files['notify-router-config.json'] || j.files[Object.keys(j.files)[0]])) || null;
+    if (!f || !f.content) return null;
+    const obj = JSON.parse(f.content);
+    return obj;
+  } catch (e) { return null; }
+}
+async function pushToGist(jsonObj) {
+  if (!gistConfigured()) return { ok: false, error: 'not-configured' };
+  try {
+    const body = {
+      description: 'notify-router config backup (auto-sync)',
+      files: { 'notify-router-config.json': { content: JSON.stringify(jsonObj, null, 2) } },
+    };
+    const res = await fetch('https://api.github.com/gists/' + encodeURIComponent(process.env.GIST_ID), {
+      method: 'PATCH',
+      headers: { 'Authorization': 'Bearer ' + process.env.GIST_TOKEN, 'Content-Type': 'application/json', 'User-Agent': 'notify-router' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) return { ok: false, error: 'gist-api-' + res.status, body: (await res.text()).slice(0, 300) };
+    return { ok: true, syncedAt: Date.now() };
+  } catch (e) { return { ok: false, error: e.message }; }
+}
+
 const UI_DEFAULTS = {
   mode: 'dark', accent: '#3b82f6', bgType: 'default', bgPreset: 'ocean',
   bgColor: '#0f1115', bgImage: '', bgDim: 0.45, radius: 12, customCss: '',
@@ -250,7 +288,43 @@ function createStore(filePath) {
     return { data: initialFromEnv(), from: 'file-error:' + main.error };
   }
 
+  // 同步版: 仅检查主文件/.bak. 异步版(readAsync)会再尝试从 Gist 拉取.
+  // 之所以拆开: createStore 是同步初始化, 但启动时也希望 Gist 拉取能起到"丢失卷也能恢复"
+  // 的兜底作用.  调用方(server 启动) 可 await readAsync() 拿到最终 data.
+  async function readAsync() {
+    const r = read();
+    // 主文件存在且来自 file/file-bak-recovered 路径, 无需从 Gist 拉
+    if (r.from === 'file' || r.from === 'file-bak-recovered') return r;
+    // 主文件不存在或损坏, 尝试从 Gist 拉回(若 env 已配)
+    if (gistConfigured()) {
+      const obj = await tryFetchFromGist();
+      if (obj && typeof obj === 'object') {
+        try {
+          // 写回主文件 + .bak
+          fs.mkdirSync(path.dirname(fp), { recursive: true });
+          try { fs.copyFileSync(fp, bp); } catch (e) {}
+          fs.writeFileSync(fp, JSON.stringify(obj, null, 2), 'utf8');
+        } catch (e) {}
+        // 同时把内存 state 也换成拉回的内容(否则旧 env-seed 还在内存里)
+        state.data = sanitizeAll(obj);
+        state.gistLastSync = Date.now();
+        return { data: state.data, from: 'gist-recovered' };
+      }
+    }
+    return r;
+  }
+
+  function sanitizeAll(obj) {
+    const merged = { ...initialFromEnv(), ...obj };
+    merged.channels = sanitizeChannels(merged.channels);
+    merged.rules = sanitizeRules(merged.rules);
+    merged.ui = sanitizeUi(obj.ui || {});
+    if ('fallbackAll' in obj) merged.fallbackAll = obj.fallbackAll === true || obj.fallbackAll === 'true';
+    return merged;
+  }
+
   let state = read();
+  state.gistLastSync = 0; // 上次成功 Gist 同步时间戳; 仅内存, 不持久化
 
   function current() {
     return JSON.parse(JSON.stringify(state.data)); // 深拷贝, 防外部误改
@@ -276,6 +350,13 @@ function createStore(filePath) {
       fs.writeFileSync(fp, JSON.stringify(next, null, 2), 'utf8');
       persisted = true;
     } catch (e) { /* 仅内存 */ }
+    // 异步: 若 env 配置了 Gist, 推送当前完整数据到云端(失败也不影响本地保存)
+    if (persisted && gistConfigured()) {
+      pushToGist(next).then((r) => {
+        if (r.ok) state.gistLastSync = Date.now();
+        else console.warn('[gist-backup] push failed:', r.error);
+      }).catch((e) => console.warn('[gist-backup]', e.message));
+    }
     return { ok: true, data: current(), persisted };
   }
 
@@ -293,6 +374,12 @@ function createStore(filePath) {
       fs.writeFileSync(fp, JSON.stringify(next, null, 2), 'utf8');
       persisted = true;
     } catch (e) {}
+    if (persisted && gistConfigured()) {
+      pushToGist(next).then((r) => {
+        if (r.ok) state.gistLastSync = Date.now();
+        else console.warn('[gist-backup] push failed:', r.error);
+      }).catch((e) => console.warn('[gist-backup]', e.message));
+    }
     return { ok: true, data: current(), persisted };
   }
 
@@ -320,7 +407,34 @@ function createStore(filePath) {
     return { ok: true, data: saved.data, persisted: saved.persisted };
   }
 
-  return { current, save, replaceAll, getFilePath, getChannelTemplate, getChannelTypes, exportRaw, importRaw };
+  // Gist 备份状态(只读, 供 /api/backup/status 返回). 不暴露 token.
+  function gistStatus() {
+    return {
+      configured: gistConfigured(),
+      lastSyncAt: state.gistLastSync || 0,
+      gistId: process.env.GIST_ID || '',  // gistId 非敏感, 可展示便于用户识别
+    };
+  }
+
+  // 手动从 Gist 拉取并覆盖(需 env 配置)
+  async function pullFromGist() {
+    if (!gistConfigured()) return { ok: false, error: '未配置 GIST_TOKEN/GIST_ID 环境变量' };
+    const obj = await tryFetchFromGist();
+    if (!obj) return { ok: false, error: 'Gist 拉取失败(检查 token 权限或 Gist ID)' };
+    const saved = replaceAll(obj);
+    state.gistLastSync = Date.now();
+    return { ok: true, persisted: saved.persisted, data: saved.data };
+  }
+
+  // 手动推送当前配置到 Gist
+  async function pushNow() {
+    if (!gistConfigured()) return { ok: false, error: '未配置 GIST_TOKEN/GIST_ID 环境变量' };
+    const r = await pushToGist(state.data);
+    if (r.ok) state.gistLastSync = Date.now();
+    return r;
+  }
+
+  return { current, save, replaceAll, getFilePath, getChannelTemplate, getChannelTypes, exportRaw, importRaw, readAsync, gistStatus, pullFromGist, pushNow };
 }
 
 module.exports = {
