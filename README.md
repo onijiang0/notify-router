@@ -160,7 +160,6 @@ curl -X POST $BASE/notify -H 'Content-Type: application/json' \
 |---|---|---|
 | 1 | `http://<宿主IP>:18081/notify` | 首选，最通用（例：`http://192.0.2.10:18081/notify`） |
 | 2 | `http://notify-router:8080/notify` | 仅当青龙与网关**同 docker 网络**（都用 `docker compose` 且同一网络时） |
-| 3 | `http://notify.<example.com>/notify` | 有反代域名时；前提青龙容器内能解析该域名 |
 
 **判断用哪个**：进青龙宿主机终端（SSH / 面板终端）跑：
 
