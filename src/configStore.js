@@ -30,6 +30,11 @@ const FIELD_DEFAULTS = {
 
 const CHANNEL_TYPES = ['wecom', 'dingtalk', 'pushplus', 'generic'];
 
+// 关键词分隔符: 英文逗号 / 中文逗号 / 顿号 / 分号 / 换行 / Tab
+// 注意: 中文输入法下用户极常用「、」, 早期版本只认逗号, 导致 "失败、失效、error"
+// 被当成一整个关键词(永不命中), 分流规则静默失效 —— 这里统一兼容。
+const KEYWORD_SPLIT_RE = /[,，、;；\r\n\t]+/;
+
 // 渠道默认定义模板(新建时用)
 function channelTemplate(type, id) {
   const base = { id: id || genId('ch'), name: '', type, enabled: false, cfg: {} };
@@ -200,11 +205,13 @@ function sanitizeRule(r) {
     channels: Array.isArray(r.channels) ? r.channels.filter((x) => typeof x === 'string').slice(0, 20) : [],
   };
   if (matchType === 'contains') {
-    // 关键词: 统一存为字符串数组(OR 匹配)。兼容旧 string / 新 array / UI 输入"a,b,c"逗号分隔
-    let kws = [];
-    if (Array.isArray(r.keyword)) kws = r.keyword;
-    else if (typeof r.keyword === 'string') kws = r.keyword.split(/[,，]/);
-    out.keyword = kws.map((k) => String(k).trim()).filter((k) => k.length > 0).slice(0, 20);
+    // 关键词: 统一存为字符串数组(OR 匹配)。兼容旧 string / 新 array / UI 输入"a,b,c"。
+    // 关键: 数组元素也要再拆一次 —— 存量配置里可能是 ["失败、失效、error"] 这种
+    // "数组里塞了一整串带顿号"的形态, 只拆 string 分支会漏掉它。
+    let raw = [];
+    if (Array.isArray(r.keyword)) raw = r.keyword.flatMap((k) => String(k).split(KEYWORD_SPLIT_RE));
+    else if (typeof r.keyword === 'string') raw = r.keyword.split(KEYWORD_SPLIT_RE);
+    out.keyword = raw.map((k) => String(k).trim()).filter((k) => k.length > 0).slice(0, 20);
     if (out.keyword.length === 0) out.keyword = [];
   }
   if (matchType === 'regex') {
@@ -269,6 +276,19 @@ function createStore(filePath) {
       merged.rules = sanitizeRules(merged.rules);
       merged.ui = sanitizeUi(main.data.ui || {});
       if ('fallbackAll' in main.data) merged.fallbackAll = main.data.fallbackAll === true || main.data.fallbackAll === 'true';
+      // 规范化结果与磁盘原文不一致(典型: 旧版把 "失败、失效、error" 存成一整个关键词),
+      // 自动写回磁盘 —— 让导出/备份/Gist 拿到的也是已修正的配置, 无需用户手动重存。
+      const changed =
+        JSON.stringify(merged.rules) !== JSON.stringify(Array.isArray(main.data.rules) ? main.data.rules : []) ||
+        JSON.stringify(merged.channels) !== JSON.stringify(Array.isArray(main.data.channels) ? main.data.channels : []);
+      if (changed) {
+        try {
+          fs.mkdirSync(path.dirname(fp), { recursive: true });
+          try { fs.copyFileSync(fp, bp); } catch (e) {}
+          fs.writeFileSync(fp, JSON.stringify(merged, null, 2), 'utf8');
+          return { data: merged, from: 'file-normalized' };
+        } catch (e) { /* 写盘失败也不影响内存使用 */ }
+      }
       return { data: merged, from: 'file' };
     }
     // 主文件损坏: 尝试从 .bak 恢复, 并写回主文件(若 .bak 有效)
@@ -293,8 +313,8 @@ function createStore(filePath) {
   // 的兜底作用.  调用方(server 启动) 可 await readAsync() 拿到最终 data.
   async function readAsync() {
     const r = read();
-    // 主文件存在且来自 file/file-bak-recovered 路径, 无需从 Gist 拉
-    if (r.from === 'file' || r.from === 'file-bak-recovered') return r;
+    // 主文件存在且来自 file / file-normalized / file-bak-recovered 路径, 无需从 Gist 拉
+    if (r.from === 'file' || r.from === 'file-normalized' || r.from === 'file-bak-recovered') return r;
     // 主文件不存在或损坏, 尝试从 Gist 拉回(若 env 已配)
     if (gistConfigured()) {
       const obj = await tryFetchFromGist();

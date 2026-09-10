@@ -305,7 +305,8 @@ function renderUiHtml() {
         <div class="toolbar">
           <h2 style="margin:0">转发日志</h2>
           <span class="sp"></span>
-          <span class="muted" style="font-size:12px">内存保留最近记录</span>
+          <span class="muted" style="font-size:12px">持久化最近 300 条 · 容器重建后仍可回看</span>
+          <button class="ghost" id="logClear" style="margin-left:10px">清空日志</button>
         </div>
         <div id="logList"></div>
       </div>
@@ -812,7 +813,11 @@ function renderRules(){
   };
 }
 function matchDesc(r){
-  if (r.match==='contains') return '标题或正文 包含「'+esc(r.keyword)+'」 → '+chNames(r.channels);
+  if (r.match==='contains') {
+    const kws = Array.isArray(r.keyword) ? r.keyword : (r.keyword?[r.keyword]:[]);
+    if (!kws.length) return '标题或正文 包含「(未设置关键词)」 → '+chNames(r.channels);
+    return '标题或正文 包含任一「'+kws.map(esc).join('、')+'」 → '+chNames(r.channels);
+  }
   if (r.match==='regex') return '标题或正文 匹配 /'+esc(r.pattern)+'/i → '+chNames(r.channels);
   return '无条件命中(所有通知) → '+chNames(r.channels);
 }
@@ -831,7 +836,8 @@ function openRuleModal(id){
     + '<button data-v="regex" '+(r&&r.match==='regex'?'on':'')+'>正则匹配</button>'
     + '<button data-v="all" '+(r&&r.match==='all'?'on':'')+'>全部命中</button></div>'
     + '<div id="rl_kwBlock"'+(r&&r.match==='regex'?' style="display:none"':'')+'>'
-    + '<label>关键词 <span class="muted">(命中任一即匹配)</span></label><input type="text" id="rl_keyword" value="'+esc(r?kwToInput(r.keyword):'')+'" placeholder="如: 失败, error, 异常 (多个用逗号分隔, 命中其一即匹配)">'
+    + '<label>关键词 <span class="muted">(命中任一即匹配)</span></label><input type="text" id="rl_keyword" value="'+esc(r?kwToInput(r.keyword):'')+'" placeholder="如: 失败, error, 异常 (逗号/顿号分隔, 命中其一即匹配)">'
+    + '<div class="hint" id="rl_kwTip"></div>'
     + '</div>'
     + '<div id="rl_reBlock"'+(r&&r.match==='regex'?'':' style="display:none"')+'>'
     + '<label>正则 <span class="muted">(忽略大小写, 如 签到.*成功)</span></label><input type="text" id="rl_pattern" value="'+esc(r?r.pattern:'')+'" placeholder="签到.*成功">'
@@ -855,6 +861,20 @@ function bindRuleForm(r, ch){
     });
   });
   $('rl_cancel').addEventListener('click', closeModal);
+  // 关键词实时拆分预览: 让用户当场看到 "失败、失效、error" 被识别成 3 个词,
+  // 避免"写成一整串 → 永不命中 → 分流静默失效"这类问题再次发生。
+  const kwEl = $('rl_keyword');
+  if (kwEl) {
+    const upd = ()=>{
+      const tip = $('rl_kwTip'); if (!tip) return;
+      const kws = kwEl.value.split(/[,，、;；\\r\\n\\t]+/).map(s=>s.trim()).filter(Boolean);
+      tip.innerHTML = kws.length
+        ? '将按 <b>'+kws.length+'</b> 个关键词「或」匹配: '+kws.map(k=>'「'+esc(k)+'」').join(' ')
+        : '<span class="muted">可用逗号、顿号、分号分隔多个关键词, 命中任意一个即匹配</span>';
+    };
+    kwEl.addEventListener('input', upd);
+    upd();
+  }
   $('rl_save').addEventListener('click', async ()=>{
     const name = $('rl_name').value.trim();
     const match = document.querySelector('#rl_match .on').dataset.v;
@@ -866,10 +886,11 @@ function bindRuleForm(r, ch){
     if (match==='regex') { try { new RegExp($('rl_pattern').value); } catch(e){ return toast('正则不合法: '+e.message,'err'); } }
     const entry = { id: r?r.id:genId('rule'), name:name||(r?r.name:'未命名'), match, enabled:true };
     if (match==='contains'){
-      // 关键词输入支持逗号分隔(OR 关系, 命中任一即匹配)
+      // 关键词输入支持多种分隔符(OR 关系, 命中任一即匹配):
+      // 英文逗号 / 中文逗号 / 顿号 / 分号 / 换行 —— 中文输入法下顿号极常用, 必须支持
       const raw = $('rl_keyword').value.trim();
-      const kws = raw.split(/[,，]/).map(s=>s.trim()).filter(Boolean);
-      if (kws.length === 0) return toast('请填写关键词(多个用英文/中文逗号分隔)','err');
+      const kws = raw.split(/[,，、;；\\r\\n\\t]+/).map(s=>s.trim()).filter(Boolean);
+      if (kws.length === 0) return toast('请填写关键词(多个用逗号/顿号分隔)','err');
       entry.keyword = kws;
     }
     if (match==='regex') entry.pattern = $('rl_pattern').value.trim();
@@ -896,7 +917,10 @@ function openTestHit(ruleId){
   showView('send');
   const r = CFG.rules.find(x=>x.id===ruleId);
   if (!r) return;
-  if (r.match==='contains') $('s_content').value = '任务执行失败: 接口返回 error 500\\n('+r.keyword+' 样例)';
+  if (r.match==='contains') {
+    const kws = Array.isArray(r.keyword) ? r.keyword : (r.keyword?[r.keyword]:[]);
+    $('s_content').value = '任务执行失败: 接口返回 error 500\\n(命中关键词「'+(kws[0]||'')+'」的样例)';
+  }
   else if (r.match==='regex') $('s_content').value = '签到成功 今日已完成';
   else $('s_content').value = '任意内容';
   toast('已填入样例, 点「投递」验证 → 应只发 '+chNames(r.channels), '');
@@ -1002,6 +1026,15 @@ async function renderSettings(){
 
 /* ================= 日志 ================= */
 async function loadLogs(){
+  const clr = $('logClear');
+  if (clr && !clr._bound) {
+    clr._bound = true;
+    clr.addEventListener('click', async ()=>{
+      await api('POST','/api/logs/clear');
+      toast('日志已清空','ok');
+      loadLogs();
+    });
+  }
   try {
     const d = await api('GET','/api/logs?n=80');
     const logs = d.logs||[];

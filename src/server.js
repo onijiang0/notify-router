@@ -14,7 +14,8 @@ try { APP_VERSION = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'packa
 
 // 配置存储: 优先读 /app/config/config.json; 若配置了 Gist, 还会异步尝试从 Gist 拉回(应对卷丢失)
 const store = createStore();
-const logr = createLogger();
+// 日志持久化到配置卷(容器重建后仍可回看最近转发记录, 便于排查"分流失效")
+const logr = createLogger(undefined, path.join(path.dirname(store.getFilePath()), 'notify-router.log.json'));
 
 function log(...a) { console.log(new Date().toISOString(), ...a); }
 function cfg() { return store.current(); }
@@ -286,6 +287,11 @@ async function router(req, res) {
   if (req.method === 'GET' && url === '/api/logs') {
     const qn = new URL(u, 'http://x').searchParams.get('n');
     return sendJson(res, 200, { ok: true, logs: logr.list(qn ? Number(qn) : 80) });
+  }
+  // 清空日志
+  if (req.method === 'POST' && url === '/api/logs/clear') {
+    logr.clear();
+    return sendJson(res, 200, { ok: true });
   }
 
   // 模拟测试投递(不走真实转发? 走真实, 但标记 type=test 不入日志)
