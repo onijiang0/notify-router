@@ -232,8 +232,37 @@ curl -X POST http://<IP>:18081/notify \
 | `FALLBACK_ALL` | true | 无规则命中是否发全部启用渠道 |
 | `LISTEN_PORT` | 8080 | 容器内监听端口 |
 | `CONFIG_FILE` | /app/config/config.json | 配置持久化路径 |
+| `GIST_TOKEN` | 空 | (可选)GitHub PAT(需 gist 权限)，配置后开启 Gist 云备份 |
+| `GIST_ID` | 空 | (可选)同步目标的 Gist ID |
 
 > 环境变量只在**服务端首次播种**。之后所有渠道/规则请在 Web UI 里配置（写盘持久化），不必依赖环境变量。
+
+## 配置防丢：Gist 云端备份（强烈推荐配置）
+
+DPanel 更新/重建容器时若卷被带走，`config.json` 会随卷消失。已内置三层保险：
+
+1. **卷挂载** `notify-router-config → /app/config`（部署时确认）
+2. **自动 .bak**：每次保存前自动备份上一份，主文件损坏启动时自动回退
+3. **Gist 云备份**：配置 `GIST_TOKEN` + `GIST_ID` 环境变量后——
+   - 启动时若本地无 `config.json`，**自动从 Gist 拉回**（卷丢了也不怕）
+   - 每次 UI 保存后**自动推送**最新配置到 Gist
+   - 「系统设置」页可查看备份状态、手动拉取/推送
+
+### 配置步骤（5 分钟）
+
+```
+1. 生成 Token：GitHub → Settings → Developer settings → Personal access tokens (classic)
+   → Generate new token → 只勾选 gist 权限即可
+2. 创建 Gist：gist.github.com 新建一个私密(secret) Gist，
+   文件名任意(如 notify-router-config.json)，内容可先放 {}
+   → 从 URL 末尾拿到 Gist ID（如 https://gist.github.com/你的用户名/abcd1234 中的 abcd1234）
+3. DPanel → 容器 → 编辑 → 环境变量，添加两条后重建容器：
+   GIST_TOKEN = 第1步的 token
+   GIST_ID    = 第2步的 Gist ID
+4. 重建启动后：本地无配置 → 自动从 Gist 恢复；之后 UI 里每次保存都自动同步到云端
+```
+
+> Token 只存在容器环境变量里，不会写入 config.json、不会通过任何 API 返回给前端。
 
 ## 常见问题
 
@@ -241,5 +270,5 @@ curl -X POST http://<IP>:18081/notify \
 - **想加一个 Bark / Server酱 / Telegram / 飞书？** → 「渠道管理 → 新增 → 自定义Webhook」，填 URL + JSON/表单/文本模板即可，无需改代码。若平台要加自定义头（如 `Authorization`），在"额外请求头"里填 JSON。
 - **想"某些失败任务才进钉钉，其余全发"？** → 加一条"包含失败 → 钉钉"规则即可；其余内容自动走"发全部"。若想更多层，多建几条规则（按顺序先命中先得）。
 - **只想要某一条只发企微、绝不多发？** → 加规则命中它 → 只选企微；并把默认策略保持"发全部"，未命中普通通知才全发——若想未命中也别发，把默认策略关掉即可。
-- **改了配置重启丢了？** → 确认容器挂载命名卷到 `/app/config`。
+- **改了配置重启丢了？** → 确认容器挂载命名卷到 `/app/config`；并按上文配置 **Gist 云备份**，即使卷丢了重启也会自动从云端恢复。更新前也可在「系统设置 → 导出配置」手动下载一份 config.json 保底。
 - **网关机器无 docker？** → `node src/server.js` 直接跑（需 Node ≥18）。
