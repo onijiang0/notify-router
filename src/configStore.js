@@ -161,7 +161,14 @@ function sanitizeRule(r) {
     enabled: r.enabled === false || r.enabled === 'false' ? false : true,
     channels: Array.isArray(r.channels) ? r.channels.filter((x) => typeof x === 'string').slice(0, 20) : [],
   };
-  if (matchType === 'contains') out.keyword = String(r.keyword || '').slice(0, 200);
+  if (matchType === 'contains') {
+    // 关键词: 统一存为字符串数组(OR 匹配)。兼容旧 string / 新 array / UI 输入"a,b,c"逗号分隔
+    let kws = [];
+    if (Array.isArray(r.keyword)) kws = r.keyword;
+    else if (typeof r.keyword === 'string') kws = r.keyword.split(/[,，]/);
+    out.keyword = kws.map((k) => String(k).trim()).filter((k) => k.length > 0).slice(0, 20);
+    if (out.keyword.length === 0) out.keyword = [];
+  }
   if (matchType === 'regex') {
     let pat = String(r.pattern || '').slice(0, 500);
     try { new RegExp(pat, 'i'); } catch (e) { pat = ''; } // 非法正则丢弃

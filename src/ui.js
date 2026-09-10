@@ -121,10 +121,10 @@ function renderUiHtml() {
   tr:hover td{background:rgba(255,255,255,.02)}
   .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
   .toolbar .sp{flex:1}
-  .toast{position:fixed;top:20px;right:20px;z-index:99;max-width:360px;background:#1f2937;color:#fff;
-    padding:11px 16px;border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.4);opacity:0;transform:translateY(-8px);
-    transition:.25s;pointer-events:none;font-size:13px}
-  .toast.show{opacity:1;transform:none}
+  .toast{position:fixed;top:80px;left:50%;transform:translateX(-50%) translateY(-8px);z-index:99;max-width:420px;min-width:200px;text-align:center;background:#1f2937;color:#fff;
+    padding:13px 22px;border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,.45);opacity:0;
+    transition:.25s;pointer-events:none;font-size:14px;font-weight:500}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   .toast.err{background:#b91c1c}
   .toast.ok{background:#15803d}
   .empty{color:var(--muted);text-align:center;padding:30px;font-size:13px}
@@ -519,7 +519,7 @@ async function api(method, path, body){
 }
 function toast(msg, type){
   const t = $('toast'); t.textContent = msg; t.className = 'toast show ' + (type||'');
-  clearTimeout(toast._t); toast._t = setTimeout(()=> t.className='toast', 2600);
+  clearTimeout(toast._t); toast._t = setTimeout(()=> t.className='toast', 3500);
 }
 
 /* ================= 导航(多页面) ================= */
@@ -815,7 +815,7 @@ function openRuleModal(id){
     + '<button data-v="regex" '+(r&&r.match==='regex'?'on':'')+'>正则匹配</button>'
     + '<button data-v="all" '+(r&&r.match==='all'?'on':'')+'>全部命中</button></div>'
     + '<div id="rl_kwBlock"'+(r&&r.match==='regex'?' style="display:none"':'')+'>'
-    + '<label>关键词 <span class="muted">(命中即走此规则)</span></label><input type="text" id="rl_keyword" value="'+esc(r?r.keyword:'')+'" placeholder="如: 失败、error、异常">'
+    + '<label>关键词 <span class="muted">(命中任一即匹配)</span></label><input type="text" id="rl_keyword" value="'+esc(r?kwToInput(r.keyword):'')+'" placeholder="如: 失败, error, 异常 (多个用逗号分隔, 命中其一即匹配)">'
     + '</div>'
     + '<div id="rl_reBlock"'+(r&&r.match==='regex'?'':' style="display:none"')+'>'
     + '<label>正则 <span class="muted">(忽略大小写, 如 签到.*成功)</span></label><input type="text" id="rl_pattern" value="'+esc(r?r.pattern:'')+'" placeholder="签到.*成功">'
@@ -849,7 +849,13 @@ function bindRuleForm(r, ch){
     if (match==='regex' && !$('rl_pattern').value.trim()) return toast('请填写正则','err');
     if (match==='regex') { try { new RegExp($('rl_pattern').value); } catch(e){ return toast('正则不合法: '+e.message,'err'); } }
     const entry = { id: r?r.id:genId('rule'), name:name||(r?r.name:'未命名'), match, enabled:true };
-    if (match==='contains') entry.keyword = $('rl_keyword').value.trim();
+    if (match==='contains'){
+      // 关键词输入支持逗号分隔(OR 关系, 命中任一即匹配)
+      const raw = $('rl_keyword').value.trim();
+      const kws = raw.split(/[,，]/).map(s=>s.trim()).filter(Boolean);
+      if (kws.length === 0) return toast('请填写关键词(多个用英文/中文逗号分隔)','err');
+      entry.keyword = kws;
+    }
     if (match==='regex') entry.pattern = $('rl_pattern').value.trim();
     entry.channels = channels;
     if (r) CFG.rules = CFG.rules.map(x=>x.id===r.id?entry:x);
@@ -1072,6 +1078,11 @@ async function loadConfig(){
 /* ================= 模态工具 ================= */
 function closeModal(){ $('modalBg').classList.remove('show'); }
 $('modalBg').addEventListener('click', (e)=>{ if(e.target===$('modalBg')) closeModal(); });
+function kwToInput(kw){
+  if (Array.isArray(kw)) return kw.join(', ');
+  return kw || '';
+}
+
 function modalConfirm(title, msg, onOk){
   $('modalBox').innerHTML='<h3>'+esc(title)+'</h3><div class="sub">'+esc(msg)+'</div>'
     +'<div class="modal-foot"><button class="ghost" id="mc_cancel">取消</button><button class="danger" id="mc_ok" style="background:rgba(239,68,68,.2);border:1px solid rgba(239,68,68,.5);color:var(--err)">确认</button></div>';

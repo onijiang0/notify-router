@@ -36,7 +36,13 @@ function compileRules(rules) {
       try { re = new RegExp(r.pattern, 'i'); } catch (e) { re = null; }
       return { ...r, _re: re };
     }
-    if (r.match === 'contains') return { ...r, _kw: String(r.keyword || '').toLowerCase() };
+    if (r.match === 'contains') {
+      // 关键词支持单字符串或字符串数组(OR 匹配, 命中任一即匹配)
+      let kws = [];
+      if (Array.isArray(r.keyword)) kws = r.keyword;
+      else if (typeof r.keyword === 'string' && r.keyword.length) kws = [r.keyword];
+      return { ...r, _kws: kws.map((k) => String(k).toLowerCase()).filter((k) => k.length > 0) };
+    }
     return { ...r };
   });
 }
@@ -57,7 +63,7 @@ function decideTargets(msg, opt) {
     let hit = false;
     if (r.match === 'all') hit = true;
     else if (r._re) hit = r._re.test(text);
-    else if (r._kw !== undefined) hit = r._kw !== '' && text.includes(r._kw);
+    else if (r._kws && r._kws.length) hit = r._kws.some((kw) => text.includes(kw));
     if (hit) {
       // 目标 = 该规则声明的渠道 ∩ 当前启用渠道(丢弃未启用的引用)
       const targets = allIds.filter((id) => r.channels.includes(id));
@@ -82,7 +88,12 @@ function decideTargets(msg, opt) {
 }
 
 function ruleDesc(r) {
-  if (r.match === 'contains') return `包含「${r.keyword}」`;
+  if (r.match === 'contains') {
+    const kws = Array.isArray(r.keyword) ? r.keyword : (r.keyword ? [r.keyword] : []);
+    if (kws.length === 0) return '包含「(空)❓」';
+    if (kws.length === 1) return `包含「${kws[0]}」`;
+    return `包含任一「${kws.join(' / ')}」`;
+  }
   if (r.match === 'regex') return `匹配 /${r.pattern}/i`;
   return '全部命中';
 }
