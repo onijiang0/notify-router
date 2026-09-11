@@ -73,9 +73,43 @@ docker compose up -d --build
    - **挂载命名卷**到容器 `/app/config`（保存 UI 里的渠道 / 规则，重启不丢）
    - **环境变量**只作首次播种，可留空后到 UI 里配
 
-> 构建时若拉 `node:20-alpine` 慢，可把 `Dockerfile` 首行换成加速源：`FROM docker.1ms.run/library/node:20-alpine`。
+> 构建时若拉 `node:20-alpine` 慢，可把 `Dockerfile` 首行换成加速源：`FROM docker.1ms.run/library/node:20-alpine`。不想本地构建也可以直接拉 CI 预构建镜像，见[方式三](#方式三拉取预构建镜像免本地构建)；面板里拉镜像卡住同样适用镜像站方案。
 
-### 方式三：不用 Docker
+### 方式三：拉取预构建镜像（免本地构建）
+
+仓库 push 后 CI 会自动构建多架构镜像并发布到 ghcr，直接拉取即可：
+
+```bash
+docker pull ghcr.io/<仓库所有者>/notify-router:latest
+
+docker run -d --name notify-router \
+  --restart unless-stopped \
+  -p 18081:8080 \
+  -e LISTEN_PORT=8080 \
+  -e AUTH_USER=admin \
+  -e AUTH_PASS='改成你的登录密码' \
+  -e FALLBACK_ALL=true \
+  -v notify-router-config:/app/config \
+  --memory 128m --cpus 0.5 \
+  ghcr.io/<仓库所有者>/notify-router:latest
+```
+
+**拉取慢 / 卡住（境内服务器常见）？** ghcr.io 在国内直连常掉到 KB 级甚至挂起，此时改用南京大学镜像站（匿名可用，与官方镜像内容一致）：
+
+```bash
+# 1. 换镜像站拉取
+docker pull ghcr.nju.edu.cn/<仓库所有者>/notify-router:latest
+
+# 2. 改回标准名（compose / 容器引用不用变）
+docker tag ghcr.nju.edu.cn/<仓库所有者>/notify-router:latest \
+           ghcr.io/<仓库所有者>/notify-router:latest
+
+# 3. 按上面的 docker run 或 compose 重建容器（卷不动, 配置不丢）
+```
+
+镜像站失效时备用思路：给 Docker daemon 配 HTTP 代理，或用「方式一」在服务器上直接 build（无第三方依赖，构建很快）。
+
+### 方式四：不用 Docker
 
 ```bash
 node src/server.js     # 需 Node ≥ 18, 会在本地生成 config.json
@@ -423,6 +457,8 @@ node src/server.js   # 本地起服务
 - **忘了登录密码？** → 密码只存在环境变量 `AUTH_PASS` 里：改掉后重建容器即可（会话存内存，重启后旧会话自然失效）。
 - **想让管理界面只能内网访问？** → 开启 `AUTH_USER`/`AUTH_PASS`，或在反代 / 防火墙层限制来源 IP。两层一起做最稳。
 - **填写地址时 `curl` 能通、脚本却发不出去？** → 多半是走了公网域名被 CDN 拦 UA（403）。改用内网 IP，见 [5.2](#52-webhookurl-填哪个地址)。
+- **面板/命令行拉 ghcr 镜像一直卡在 0%？** → 境内直连 ghcr.io 的通病。停掉当前拉取，换 `ghcr.nju.edu.cn/<仓库所有者>/notify-router:latest`拉取后 `docker tag` 改回标准名，见[方式三](#方式三拉取预构建镜像免本地构建)。
+- **DPanel 点「重新部署」但版本一直没变？** → 重新部署只是用**本地已有镜像**重建容器，不会主动拉新 latest。更新套路固定为：先 `docker pull`（或 compose pull）拿到新镜像，再重建容器。
 - **网关机器没装 docker？** → `node src/server.js` 直接跑（需 Node ≥ 18）。
 
 ---
